@@ -36,6 +36,7 @@ Usage:
 
 import argparse
 import base64
+import hmac
 import http.server
 import json
 import mimetypes
@@ -291,11 +292,46 @@ def run_proxy_server(port: int = 8080, api_base: str = DEFAULT_API_BASE, host: s
     Binds loopback only by default: the proxy forwards to a public endpoint without
     authentication, so listening on 0.0.0.0 would expose it to the whole LAN. Pass
     --host 0.0.0.0 explicitly if that is really wanted.
+
+    Optional access control: set PROXY_API_KEYS (comma-separated) and clients must send
+    "Authorization: Bearer <key>" or "x-api-key: <key>". Unset keeps the original
+    unauthenticated behavior.
     """
+    api_keys = [k.strip().encode("utf-8") for k in os.environ.get("PROXY_API_KEYS", "").split(",") if k.strip()]
 
     class ProxyHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             sys.stderr.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {args[0]} {args[1]}\n")
+
+        def is_authorized(self) -> bool:
+            if not api_keys:
+                return True
+            token = self.headers.get("x-api-key", "").strip()
+            auth = self.headers.get("Authorization", "").strip()
+            if auth.lower().startswith("bearer "):
+                token = auth[7:].strip()
+            token_bytes = token.encode("utf-8")
+            # Compare against every key so timing does not reveal which one matched.
+            matched = False
+            for key in api_keys:
+                matched |= hmac.compare_digest(token_bytes, key)
+            return matched
+
+        def reject_unauthorized(self):
+            body = json.dumps({
+                "error": {
+                    "message": "Invalid or missing API key.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }
+            }).encode("utf-8")
+            self.send_response(401)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_OPTIONS(self):
             self.send_response(200)
@@ -307,6 +343,9 @@ def run_proxy_server(port: int = 8080, api_base: str = DEFAULT_API_BASE, host: s
 
         def do_GET(self):
             if self.path in ("/v1/models", "/models"):
+                if not self.is_authorized():
+                    self.reject_unauthorized()
+                    return
                 body = json.dumps({
                     "object": "list",
                     "data": [
@@ -332,6 +371,10 @@ def run_proxy_server(port: int = 8080, api_base: str = DEFAULT_API_BASE, host: s
             if not (self.path.endswith("/chat/completions") or self.path.endswith("/completions") or self.path.endswith("/responses")):
                 self.send_response(404)
                 self.end_headers()
+                return
+
+            if not self.is_authorized():
+                self.reject_unauthorized()
                 return
 
             content_length = int(self.headers.get("Content-Length", 0))
@@ -420,12 +463,13 @@ def run_proxy_server(port: int = 8080, api_base: str = DEFAULT_API_BASE, host: s
     print("=" * 60)
     print(f"Index-Translate Local Proxy listening on {host}:{port} — http://{display_host}:{port}/v1")
     print(f"Upstream API: {api_base}")
+    print(f"API Key auth: {'enabled (' + str(len(api_keys)) + ' key(s))' if api_keys else 'disabled'}")
     print()
     print("沉浸式翻译 (Immersive Translate) 配置指南:")
     print("  1. 翻译服务选择: 自定义 (OpenAI 兼容)")
     print(f"  2. 接口地址 (API URL): http://{display_host}:{port}/v1")
     print("  3. 模型 (Model): Index-Translate-35B-A3B")
-    print("  4. API Key: 随意填写 (如 index)")
+    print("  4. API Key: " + ("PROXY_API_KEYS 中的任一 Key" if api_keys else "随意填写 (如 index)"))
     print("=" * 60, flush=True)
     try:
         server.serve_forever()

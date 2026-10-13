@@ -4,6 +4,9 @@ services:
     image: index-translate-proxy:latest
     container_name: index-translate-proxy
     command: ["--serve", "8080", "--host", "0.0.0.0", "--api-base", "${API_BASE:-https://index-translate.bilibili.com/v1}"]
+    environment:
+      # 访问鉴权 Key，多个用逗号分隔；未设置则拒绝启动，避免无鉴权暴露
+      PROXY_API_KEYS: ${PROXY_API_KEYS:?请在 .env 中设置 PROXY_API_KEYS}
     ports:
       - "${BIND_HOST:-127.0.0.1}:${HOST_PORT:-8967}:8080"
     # 宿主机若开启 TUN/fake-ip 代理，容器会解析到 198.18.x.x 假 IP 导致上游超时，故显式指定 DNS
@@ -12,7 +15,7 @@ services:
       - ${DNS_SECONDARY:-119.29.29.29}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/v1/models',timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/',timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
